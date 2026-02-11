@@ -1,0 +1,184 @@
+name: Deploy to Production
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+jobs:
+  deploy:
+    name: Deploy to ${{ github.event.inputs.environment || 'production' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.inputs.environment || 'production' }}
+      url: ${{ secrets.APP_URL }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.DOCKER_REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "release" ]; then
+            echo "VERSION=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=$(date +%Y%m%d)-${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push Backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_REGISTRY }}/skillswap-backend:${{ steps.version.outputs.VERSION }}
+            ${{ secrets.DOCKER_REGISTRY }}/skillswap-backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            NODE_ENV=production
+
+      - name: Build and push Frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_REGISTRY }}/skillswap-frontend:${{ steps.version.outputs.VERSION }}
+            ${{ secrets.DOCKER_REGISTRY }}/skillswap-frontend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            NODE_ENV=production
+            VITE_API_URL=${{ secrets.VITE_API_URL }}
+            VITE_SOCKET_URL=${{ secrets.VITE_SOCKET_URL }}
+
+      - name: Deploy to Server
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          script: |
+            cd /opt/skillswap
+
+            # Pull latest images
+            docker-compose -f docker-compose.prod.yml pull
+
+            # Backup database before deployment
+            docker-compose -f docker-compose.prod.yml exec -T postgres \
+              pg_dump -U $DB_USER $DB_NAME | gzip > backups/pre-deploy-$(date +%Y%m%d-%H%M%S).sql.gz
+
+            # Run database migrations
+            docker-compose -f docker-compose.prod.yml run --rm backend \
+              npx prisma migrate deploy
+
+            # Restart services with zero-downtime
+            docker-compose -f docker-compose.prod.yml up -d --no-deps --build backend frontend
+
+            # Wait for services to be healthy
+            timeout 120 bash -c 'until docker-compose -f docker-compose.prod.yml ps | grep -q "healthy"; do sleep 2; done'
+
+            # Clean up old images
+            docker image prune -af --filter "until=72h"
+
+            echo "Deployment completed successfully!"
+
+      - name: Run smoke tests
+        run: |
+          # Wait for application to be ready
+          sleep 10
+
+          # Test backend health
+          curl -f ${{ secrets.API_URL }}/health || exit 1
+
+          # Test frontend
+          curl -f ${{ secrets.APP_URL }} || exit 1
+
+          echo "Smoke tests passed!"
+
+      - name: Notify deployment success
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const version = '${{ steps.version.outputs.VERSION }}';
+            const env = '${{ github.event.inputs.environment || 'production' }}';
+
+            github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              deployment_id: context.payload.deployment.id,
+              state: 'success',
+              description: `Deployed version ${version} to ${env}`,
+              environment_url: '${{ secrets.APP_URL }}'
+            });
+
+      - name: Notify deployment failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              deployment_id: context.payload.deployment.id,
+              state: 'failure',
+              description: 'Deployment failed',
+            });
+
+            // Create an issue for failed deployment
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Deployment Failed: ${new Date().toISOString()}`,
+              body: `Deployment to ${env} failed. Check the [workflow run](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`,
+              labels: ['deployment', 'bug']
+            });
+
+      - name: Rollback on failure
+        if: failure()
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          script: |
+            cd /opt/skillswap
+
+            # Rollback to previous version
+            docker-compose -f docker-compose.prod.yml down
+
+            # Restore from backup
+            LATEST_BACKUP=$(ls -t backups/pre-deploy-*.sql.gz | head -1)
+            gunzip -c $LATEST_BACKUP | docker-compose -f docker-compose.prod.yml exec -T postgres \
+              psql -U $DB_USER $DB_NAME
+
+            # Restart with previous images
+            docker-compose -f docker-compose.prod.yml up -d
+
+            echo "Rollback completed!"

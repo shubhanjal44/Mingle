@@ -1,0 +1,100 @@
+name: Frontend CI
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-ci.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'frontend/**'
+
+jobs:
+  lint-and-build:
+    name: Lint and Build Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run linter
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Type check
+        working-directory: frontend
+        run: npm run type-check
+
+      - name: Build application
+        working-directory: frontend
+        env:
+          VITE_API_URL: https://api.skillswap.in/api/v1
+          VITE_SOCKET_URL: https://api.skillswap.in
+        run: npm run build
+
+      - name: Check build output
+        working-directory: frontend
+        run: |
+          if [ ! -d "dist" ]; then
+            echo "Build failed: dist directory not found"
+            exit 1
+          fi
+          echo "Build successful!"
+
+      - name: Analyze bundle size
+        working-directory: frontend
+        run: |
+          echo "=== Bundle Size Analysis ==="
+          du -sh dist
+          echo "=== JavaScript Chunks ==="
+          find dist/assets -name "*.js" -exec du -h {} \; | sort -hr
+          echo "=== CSS Chunks ==="
+          find dist/assets -name "*.css" -exec du -h {} \; | sort -hr
+
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: lint-and-build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: false
+          tags: skillswap-frontend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VITE_API_URL=${{ secrets.VITE_API_URL }}
+            VITE_SOCKET_URL=${{ secrets.VITE_SOCKET_URL }}
+
+      - name: Test Docker image
+        run: |
+          docker run --rm -d --name test-frontend -p 3001:3000 skillswap-frontend:${{ github.sha }}
+          sleep 5
+          curl -f http://localhost:3001/health || exit 1
+          docker stop test-frontend
+          echo "Docker image test successful!"
