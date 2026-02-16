@@ -1,0 +1,108 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  USER
+  ADMIN
+  MODERATOR
+}
+
+enum DatingIntent {
+  CASUAL
+  SERIOUS
+  BOTH
+}
+
+enum SubscriptionTier {
+  FREE
+  PREMIUM
+}
+
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  password      String
+  name          String
+  bio           String?
+  dateOfBirth   DateTime?
+  gender        String?
+  interestedIn  String?
+  datingIntent  DatingIntent @default(BOTH)
+  city          String?
+  state         String?
+  latitude      Float?
+  longitude     Float?
+  activityScore Int      @default(0)
+  profileScore  Int      @default(0)
+  role          UserRole @default(USER)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  photos        UserPhoto[]
+  prompts       Prompt[]
+  sentLikes     Like[]   @relation("SentLikes")
+  receivedLikes Like[]   @relation("ReceivedLikes")
+  matchesOne    Match[]  @relation("MatchUserOne")
+  matchesTwo    Match[]  @relation("MatchUserTwo")
+
+
+  subscription  UserSubscription?   // 👈 ADD THIS LINE
+  @@index([city])
+  @@index([datingIntent])
+}
+
+model UserPhoto {
+  id     String @id @default(uuid())
+  userId String
+  url    String
+  order  Int
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Prompt {
+  id       String @id @default(uuid())
+  userId   String
+  question String
+  answer   String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Like {
+  id         String   @id @default(uuid())
+  fromUserId String
+  toUserId   String
+  createdAt  DateTime @default(now())
+
+  fromUser User @relation("SentLikes", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUser   User @relation("ReceivedLikes", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  @@unique([fromUserId, toUserId])
+}
+
+model Match {
+  id        String   @id @default(uuid())
+  userOneId String
+  userTwoId String
+  createdAt DateTime @default(now())
+
+  userOne User @relation("MatchUserOne", fields: [userOneId], references: [id], onDelete: Cascade)
+  userTwo User @relation("MatchUserTwo", fields: [userTwoId], references: [id], onDelete: Cascade)
+
+  @@unique([userOneId, userTwoId])
+}
+
+model UserSubscription {
+  id     String           @id @default(uuid())
+  userId String           @unique
+  tier   SubscriptionTier @default(FREE)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}

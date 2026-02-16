@@ -1,0 +1,113 @@
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+  MODERATOR
+}
+
+enum DatingIntent {
+  CASUAL
+  SERIOUS
+  BOTH
+}
+
+enum SubscriptionTier {
+  FREE
+  PREMIUM
+}
+
+model User {
+  id             String           @id @default(uuid())
+  email          String           @unique
+  password       String
+  name           String
+  bio            String?
+  dateOfBirth    DateTime?        @map("date_of_birth")
+  gender         String?
+  interestedIn   String?          @map("interested_in") // e.g., "Female", "Male", "Everyone"
+  datingIntent   DatingIntent     @default(BOTH) @map("dating_intent")
+  city           String?
+  state          String?
+  latitude       Float?
+  longitude      Float?
+  activityScore  Int              @default(0) @map("activity_score")
+  profileScore   Int              @default(0) @map("profile_score")
+  role           UserRole         @default(USER)
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  photos         UserPhoto[]
+  prompts        Prompt[]
+  sentLikes      Like[]           @relation("SentLikes")
+  receivedLikes  Like[]           @relation("ReceivedLikes")
+  matchesOne     Match[]          @relation("UserOneMatches")
+  matchesTwo     Match[]          @relation("UserTwoMatches")
+  subscription   UserSubscription?
+
+  @@map("users")
+}
+
+model UserPhoto {
+  id     String @id @default(uuid())
+  userId String
+  url    String
+  order  Int    @default(0) // For ordering photos
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, order]) // Ensure unique order per user
+  @@map("user_photos")
+}
+
+model Prompt {
+  id       String @id @default(uuid())
+  userId   String
+  question String
+  answer   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("prompts")
+}
+
+model Like {
+  id         String   @id @default(uuid())
+  fromUserId String
+  toUserId   String
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  fromUser   User     @relation("SentLikes", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUser     User     @relation("ReceivedLikes", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  @@unique([fromUserId, toUserId]) // A user can only like another user once
+  @@map("likes")
+}
+
+model Match {
+  id        String   @id @default(uuid())
+  userOneId String
+  userTwoId String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  userOne   User     @relation("UserOneMatches", fields: [userOneId], references: [id], onDelete: Cascade)
+  userTwo   User     @relation("UserTwoMatches", fields: [userTwoId], references: [id], onDelete: Cascade)
+
+  @@unique([userOneId, userTwoId]) // Ensure unique match between two users
+  @@map("matches")
+}
+
+model UserSubscription {
+  id     String         @id @default(uuid())
+  userId String         @unique
+  tier   SubscriptionTier @default(FREE)
+  user   User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_subscriptions")
+}
